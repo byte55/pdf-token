@@ -1,0 +1,5 @@
+.env
+.idea/
+.venv/
+index_storage/
+pdf_tokenizer.log

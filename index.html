@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Query Interface</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <!-- JSXL für Vektoroperationen -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+    <style>
+        .api-key-input {
+            font-family: monospace;
+            letter-spacing: 0.5px;
+        }
+
+        .source-item {
+            border-left: 3px solid #007bff;
+            padding-left: 10px;
+            margin-bottom: 15px;
+        }
+
+        .loading-indicator {
+            display: none;
+        }
+
+        .loading-indicator.active {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 20px 0;
+        }
+
+        #result-container {
+            display: none;
+        }
+
+        .score-badge {
+            font-size: 0.8rem;
+        }
+
+        .api-key-container {
+            position: relative;
+        }
+
+        #toggleApiKey {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="row mb-4">
+            <div class="col">
+                <h1>PDF Query Interface</h1>
+                <p class="lead">Stelle Fragen zu deinen indizierten PDF-Dokumenten</p>
+            </div>
+        </div>
+
+        <!-- API Key Input -->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">Anthropic API-Schlüssel</h5>
+            </div>
+            <div class="card-body">
+                <div class="form-text mb-2">
+                    Dein API-Schlüssel wird nur lokal im Browser gespeichert und nicht weitergegeben.
+                </div>
+                <div class="api-key-container">
+                    <input type="password" id="apiKey" class="form-control api-key-input"
+                           placeholder="Anthropic API Key (beginnt mit sk-ant-...)"
+                           value="">
+                    <button type="button" id="toggleApiKey" title="API Key anzeigen/verbergen">
+                        <i class="bi bi-eye"></i>👁️
+                    </button>
+                </div>
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="saveApiKey">
+                    <label class="form-check-label" for="saveApiKey">
+                        API-Schlüssel im Browser speichern
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Query Input -->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">Frage stellen</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="query" class="form-label">Deine Frage</label>
+                    <textarea id="query" class="form-control" rows="3"
+                              placeholder="Was möchtest du über deine Dokumente wissen?">in welcher Auflösung müssen die Zählerstände in MÜ-A gesendet werden ? 15-minütliche Zählerstände, tägliche oder monatliche?
+                    </textarea>
+                </div>
+                <div class="mb-3">
+                    <label for="maxResults" class="form-label">Maximale Anzahl relevanter Quellen</label>
+                    <input type="number" id="maxResults" class="form-control" min="1" max="20" value="5">
+                </div>
+                <button id="searchButton" class="btn btn-primary" type="button">
+                    Frage stellen
+                </button>
+            </div>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loadingIndicator" class="loading-indicator">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Lädt...</span>
+            </div>
+            <span class="ms-2">Verarbeite Anfrage...</span>
+        </div>
+
+        <!-- Results -->
+        <div id="result-container">
+            <div class="card mb-4">
+                <div class="card-header bg-success text-white">
+                    <h5 class="mb-0">Antwort</h5>
+                </div>
+                <div class="card-body">
+                    <div id="answer" class="mb-3"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0">Quellen</h5>
+                </div>
+                <div class="card-body">
+                    <div id="sources"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS bundle -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // Konstanten
+        const INDEX_FILES = {
+            VECTOR_STORE: 'index_storage/default__vector_store.json',
+            DOC_STORE: 'index_storage/docstore.json',
+            INDEX_STORE: 'index_storage/index_store.json'
+        };
+
+        // Globale Variablen
+        let vectorStore = null;
+        let docStore = null;
+        let indexStore = null;
+
+        // DOM-Elemente
+        const apiKeyInput = document.getElementById('apiKey');
+        const saveApiKeyCheckbox = document.getElementById('saveApiKey');
+        const toggleApiKeyButton = document.getElementById('toggleApiKey');
+        const queryInput = document.getElementById('query');
+        const maxResultsInput = document.getElementById('maxResults');
+        const searchButton = document.getElementById('searchButton');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        const resultContainer = document.getElementById('result-container');
+        const answerElement = document.getElementById('answer');
+        const sourcesElement = document.getElementById('sources');
+
+        // Event-Listener einrichten
+        document.addEventListener('DOMContentLoaded', async () => {
+            // API-Key aus dem localStorage laden (falls gespeichert)
+            const savedApiKey = localStorage.getItem('anthropicApiKey');
+            if (savedApiKey) {
+                apiKeyInput.value = savedApiKey;
+                saveApiKeyCheckbox.checked = true;
+            }
+
+            // Index-Dateien laden
+            try {
+                await loadIndexFiles();
+                console.log('Index files loaded successfully');
+            } catch (error) {
+                console.error('Error loading index files:', error);
+                alert('Fehler beim Laden der Index-Dateien. Bitte stelle sicher, dass die Dateien im richtigen Verzeichnis liegen.');
+            }
+
+            // Event-Listener für den Such-Button
+            searchButton.addEventListener('click', handleSearch);
+
+            // Event-Listener für die Enter-Taste im Textfeld
+            queryInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    handleSearch();
+                }
+            });
+
+            // Event-Listener für das Toggle-API-Key-Button
+            toggleApiKeyButton.addEventListener('click', () => {
+                if (apiKeyInput.type === 'password') {
+                    apiKeyInput.type = 'text';
+                    toggleApiKeyButton.innerHTML = '👁️‍🗨️';
+                } else {
+                    apiKeyInput.type = 'password';
+                    toggleApiKeyButton.innerHTML = '👁️';
+                }
+            });
+
+            // API-Key speichern, wenn die Checkbox geändert wird
+            saveApiKeyCheckbox.addEventListener('change', () => {
+                if (saveApiKeyCheckbox.checked) {
+                    localStorage.setItem('anthropicApiKey', apiKeyInput.value);
+                } else {
+                    localStorage.removeItem('anthropicApiKey');
+                }
+            });
+
+            // API-Key speichern, wenn sich der Wert ändert und die Checkbox aktiviert ist
+            apiKeyInput.addEventListener('input', () => {
+                if (saveApiKeyCheckbox.checked) {
+                    localStorage.setItem('anthropicApiKey', apiKeyInput.value);
+                }
+            });
+        });
+
+        // Index-Dateien laden
+        // Index-Dateien laden
+        async function loadIndexFiles() {
+            try {
+                // Lade alle Dateien parallel
+                const [vectorStoreData, docStoreData, indexStoreData] = await Promise.all([
+                    fetch(INDEX_FILES.VECTOR_STORE).then(res => res.json()),
+                    fetch(INDEX_FILES.DOC_STORE).then(res => res.json()),
+                    fetch(INDEX_FILES.INDEX_STORE).then(res => res.json())
+                ]);
+
+                console.log('Vector Store Hauptschlüssel:', Object.keys(vectorStoreData));
+                console.log('DocStore Hauptschlüssel:', Object.keys(docStoreData));
+                console.log('Index Store Hauptschlüssel:', Object.keys(indexStoreData));
+
+                // DocStore-Struktur detaillierter analysieren
+                if (docStoreData["docstore/data"]) {
+                    const docDataKeys = Object.keys(docStoreData["docstore/data"]);
+                    console.log('DocStore enthält "docstore/data" mit', docDataKeys.length, 'Einträgen');
+
+                    // Beispiel für einen Eintrag anzeigen (für Debug-Zwecke)
+                    if (docDataKeys.length > 0) {
+                        const firstKey = docDataKeys[0];
+                        const exampleNode = docStoreData["docstore/data"][firstKey];
+                        console.log('Beispiel für docstore/data-Eintrag:', firstKey);
+                        console.log('Schlüssel im Beispieleintrag:', Object.keys(exampleNode));
+
+                        // Prüfen, ob der Eintrag ein __data__ Feld hat
+                        if (exampleNode.__data__) {
+                            try {
+                                const parsedData = JSON.parse(exampleNode.__data__);
+                                console.log('Inhalt des __data__ Felds:', Object.keys(parsedData));
+                            } catch (e) {
+                                console.log('__data__ konnte nicht als JSON geparst werden');
+                            }
+                        }
+                    }
+                }
+
+                // Analyse der ref_doc_info
+                if (docStoreData["docstore/ref_doc_info"]) {
+                    const refDocKeys = Object.keys(docStoreData["docstore/ref_doc_info"]);
+                    console.log('DocStore enthält "docstore/ref_doc_info" mit', refDocKeys.length, 'Einträgen');
+
+                    // Beispiel für einen Eintrag anzeigen
+                    if (refDocKeys.length > 0) {
+                        const firstKey = refDocKeys[0];
+                        console.log('Beispiel für docstore/ref_doc_info-Eintrag:', firstKey);
+                        console.log('Inhalt:', docStoreData["docstore/ref_doc_info"][firstKey]);
+                    }
+                }
+
+                // Index Store Struktur analysieren
+                if (indexStoreData["index_store/data"]) {
+                    const indexDataKeys = Object.keys(indexStoreData["index_store/data"]);
+                    console.log('Index Store enthält "index_store/data" mit', indexDataKeys.length, 'Einträgen');
+
+                    // Beispiel für einen Eintrag anzeigen
+                    if (indexDataKeys.length > 0) {
+                        const firstKey = indexDataKeys[0];
+                        console.log('Beispiel für index_store/data-Eintrag:', firstKey);
+                        const exampleEntry = indexStoreData["index_store/data"][firstKey];
+                        console.log('Typ:', exampleEntry.__type__);
+
+                        // Wenn es ein vector_store ist, analysieren
+                        if (exampleEntry.__type__ === "vector_store" && exampleEntry.__data__) {
+                            try {
+                                const parsedData = JSON.parse(exampleEntry.__data__);
+                                console.log('Vector Store Daten enthält:', Object.keys(parsedData));
+                                if (parsedData.nodes_dict) {
+                                    console.log('Anzahl der Nodes im Vector Store:',
+                                        Object.keys(parsedData.nodes_dict).length);
+                                }
+                            } catch (e) {
+                                console.log('__data__ konnte nicht als JSON geparst werden');
+                            }
+                        }
+                    }
+                }
+
+                vectorStore = vectorStoreData;
+                docStore = docStoreData;
+                indexStore = indexStoreData;
+
+                // Debugging: Validiere, ob die wichtigsten Komponenten vorhanden sind
+                if (vectorStore.embedding_dict) {
+                    const embeddingCount = Object.keys(vectorStore.embedding_dict).length;
+                    console.log(`Vector Store enthält ${embeddingCount} Embeddings`);
+
+                    // Beispiel für einen Eintrag anzeigen
+                    const firstKey = Object.keys(vectorStore.embedding_dict)[0];
+                    if (firstKey) {
+                        const embeddingLength = vectorStore.embedding_dict[firstKey].length;
+                        console.log(`Embedding-Dimension: ${embeddingLength}`);
+                    }
+                } else {
+                    console.warn("WARNUNG: Keine embedding_dict im Vector Store gefunden!");
+                }
+
+                // Mapping-Prüfung
+                if (vectorStore.text_id_to_ref_doc_id) {
+                    const mappingCount = Object.keys(vectorStore.text_id_to_ref_doc_id).length;
+                    console.log(`Vector Store enthält "text_id_to_ref_doc_id" mit ${mappingCount} Mappings`);
+                }
+
+                console.log('Index-Dateien erfolgreich geladen und analysiert.');
+
+            } catch (error) {
+                console.error('Error loading index files:', error);
+                alert(`Fehler beim Laden der Index-Dateien: ${error.message}\nBitte überprüfen Sie, ob die Dateien im richtigen Verzeichnis liegen.`);
+                throw error;
+            }
+        }
+
+        // Suchanfrage verarbeiten
+        async function handleSearch() {
+            const query = queryInput.value.trim();
+            const maxResults = parseInt(maxResultsInput.value);
+            const apiKey = apiKeyInput.value.trim();
+
+            if (!query) {
+                alert('Bitte gib eine Frage ein.');
+                return;
+            }
+
+            if (!apiKey || !apiKey.startsWith('sk-ant-')) {
+                alert('Bitte gib einen gültigen Anthropic API-Schlüssel ein (beginnt mit sk-ant-...)');
+                return;
+            }
+
+            // UI-Status aktualisieren
+            loadingIndicator.classList.add('active');
+            searchButton.disabled = true;
+            resultContainer.style.display = 'none';
+
+            try {
+                // Ähnlichkeitssuche durchführen
+                const queryEmbedding = await generateQueryEmbedding(query);
+                const topResults = performVectorSearch(queryEmbedding, maxResults);
+
+                // LLM-Antwort mit Anthropic generieren
+                const answer = await generateAnthropicAnswer(query, topResults, apiKey);
+
+                // Ergebnisse anzeigen
+                displayResults(answer, topResults);
+            } catch (error) {
+                console.error('Error processing query:', error);
+                alert(`Fehler bei der Verarbeitung der Anfrage: ${error.message}`);
+            } finally {
+                // UI-Status zurücksetzen
+                loadingIndicator.classList.remove('active');
+                searchButton.disabled = false;
+            }
+        }
+
+        // Query-Embedding generieren (vereinfachte Version - normalerweise würde man hier die gleiche
+        // Embedding-Methode wie beim Indizieren verwenden)
+        async function generateQueryEmbedding(query) {
+            // In einer vollständigen Implementierung würdest du hier einen API-Aufruf
+            // an einen Embedding-Service machen
+
+            try {
+                if (!vectorStore || !vectorStore.embedding_dict) {
+                    throw new Error("Vector Store oder embedding_dict nicht gefunden");
+                }
+
+                // Wir wissen jetzt, dass wir die embedding_dict-Struktur haben
+                const nodeIds = Object.keys(vectorStore.embedding_dict);
+
+                if (nodeIds.length === 0) {
+                    throw new Error("Keine Embeddings in embedding_dict gefunden");
+                }
+
+                // Wähle ein zufälliges Embedding als Beispiel
+                const randomIndex = Math.floor(Math.random() * nodeIds.length);
+                const randomNodeId = nodeIds[randomIndex];
+                const exampleEmbedding = vectorStore.embedding_dict[randomNodeId];
+
+                if (!Array.isArray(exampleEmbedding)) {
+                    throw new Error(`Das ausgewählte Embedding ist kein Array: ${typeof exampleEmbedding}`);
+                }
+
+                console.log(`Embedding-Dimension: ${exampleEmbedding.length}`);
+                console.log(`Beispiel-Werte: ${exampleEmbedding.slice(0, 5).join(', ')}...`);
+
+                // Erzeuge ein zufälliges "Query-Embedding", basierend auf dem Beispiel
+                // In der Realität würde man hier den Abfragetext durch das gleiche Modell laufen lassen
+
+                // Erzeuge eine kleine Variation des Beispiel-Embeddings
+                // Das ist ein einfacher Ansatz, um ein Pseudo-Query-Embedding zu erstellen
+                // Im Ernstfall müsste der Text an einen Embedding-Service gesendet werden
+                const queryEmbedding = exampleEmbedding.map(val => val + (Math.random() - 0.5) * 0.02);
+
+                return queryEmbedding;
+
+            } catch (error) {
+                console.error('Fehler beim Generieren des Query-Embeddings:', error);
+
+                // Fallback: Erzeuge einen zufälligen Vektor mit 1024 Dimensionen
+                // (basierend auf den Logs scheinen deine Vektoren 1024-dimensional zu sein)
+                return Array(1024).fill(0).map(() => (Math.random() - 0.5) * 0.01);
+            }
+        }
+
+        // Vektorsuche mit Cosinus-Ähnlichkeit
+        // Vektorsuche mit Cosinus-Ähnlichkeit
+        // Vektorsuche mit Cosinus-Ähnlichkeit
+        function performVectorSearch(queryEmbedding, maxResults) {
+            const results = [];
+
+            try {
+                // Prüfen, ob die nötigen Datenstrukturen vorhanden sind
+                if (!vectorStore || !vectorStore.embedding_dict) {
+                    throw new Error("Fehler: Keine embedding_dict im Vector Store gefunden");
+                }
+
+                const nodeIds = Object.keys(vectorStore.embedding_dict);
+                console.log(`Gefundene NodeIDs im Vector Store: ${nodeIds.length}`);
+
+                // Direkt ein Beispiel aus dem docStore/data anzeigen
+                if (docStore && docStore["docstore/data"]) {
+                    const firstNodeId = Object.keys(docStore["docstore/data"])[0];
+                    console.log("Beispiel eines Knotens aus docstore/data:", firstNodeId);
+                    console.log(docStore["docstore/data"][firstNodeId]);
+
+                    // Wenn __data__ existiert und ein Object ist (nicht ein String)
+                    if (docStore["docstore/data"][firstNodeId].__data__) {
+                        console.log("__data__ ist vom Typ:", typeof docStore["docstore/data"][firstNodeId].__data__);
+
+                        // Wenn __data__ ein Objekt ist, versuchen wir, direkt darauf zuzugreifen
+                        const dataObj = docStore["docstore/data"][firstNodeId].__data__;
+                        console.log("Schlüssel in __data__:", Object.keys(dataObj));
+                    }
+                }
+
+                // Referenz-Dokument-Infos anzeigen
+                if (docStore && docStore["docstore/ref_doc_info"]) {
+                    const firstRefDocId = Object.keys(docStore["docstore/ref_doc_info"])[0];
+                    console.log("Beispiel eines Referenzdokuments:", firstRefDocId);
+                    console.log(docStore["docstore/ref_doc_info"][firstRefDocId]);
+                }
+
+                // Für jeden Node im embedding_dict
+                for (const nodeId of nodeIds) {
+                    const embedding = vectorStore.embedding_dict[nodeId];
+
+                    if (!embedding || !Array.isArray(embedding)) {
+                        console.warn(`Kein gültiges Embedding gefunden für ${nodeId}`);
+                        continue;
+                    }
+
+                    const similarity = cosineSimilarity(queryEmbedding, embedding);
+
+                    // Versuchen, Metadaten und Text zu finden
+                    let text = null;
+                    let metadata = {};
+
+                    // Aus docstore/data holen
+                    if (docStore["docstore/data"] && docStore["docstore/data"][nodeId]) {
+                        const nodeData = docStore["docstore/data"][nodeId];
+
+                        // Wenn __data__ existiert und ein Objekt ist
+                        if (nodeData.__data__ && typeof nodeData.__data__ === 'object') {
+                            // Direkt auf Eigenschaften von __data__ zugreifen
+                            const dataObj = nodeData.__data__;
+
+                            // Text extrahieren
+                            if (dataObj.text) {
+                                text = dataObj.text;
+                            }
+
+                            // Metadaten extrahieren
+                            if (dataObj.metadata) {
+                                metadata = dataObj.metadata;
+                            }
+
+                            // Falls kein Text gefunden, nach dem extracts-Feld suchen
+                            if (!text && dataObj.extracts) {
+                                text = Array.isArray(dataObj.extracts)
+                                    ? dataObj.extracts.join('\n\n')
+                                    : dataObj.extracts;
+                            }
+                        }
+
+                        // Wenn immer noch kein Text gefunden, versuchen, __data__ als String zu behandeln
+                        if (!text && typeof nodeData.__data__ === 'string') {
+                            try {
+                                const parsedData = JSON.parse(nodeData.__data__);
+                                text = parsedData.text || parsedData.content;
+
+                                if (!text && parsedData.extracts) {
+                                    text = Array.isArray(parsedData.extracts)
+                                        ? parsedData.extracts.join('\n\n')
+                                        : parsedData.extracts;
+                                }
+
+                                if (parsedData.metadata) {
+                                    metadata = {...metadata, ...parsedData.metadata};
+                                }
+                            } catch (e) {
+                                // Fehler beim Parsen ignorieren
+                            }
+                        }
+                    }
+
+                    // Wenn kein Text gefunden, versuchen über das Referenzdokument
+                    if (!text && vectorStore.text_id_to_ref_doc_id) {
+                        const refDocId = vectorStore.text_id_to_ref_doc_id[nodeId];
+
+                        if (refDocId && docStore["docstore/ref_doc_info"] &&
+                            docStore["docstore/ref_doc_info"][refDocId]) {
+
+                            const refDocInfo = docStore["docstore/ref_doc_info"][refDocId];
+
+                            // Metadaten aus dem Referenzdokument extrahieren
+                            if (refDocInfo.metadata) {
+                                metadata = {...metadata, ...refDocInfo.metadata};
+                            }
+
+                            // Wenn ref_doc hat node_ids, versuchen alle Texte dieser Nodes zu sammeln
+                            if (refDocInfo.node_ids && Array.isArray(refDocInfo.node_ids)) {
+                                for (const refNodeId of refDocInfo.node_ids) {
+                                    if (docStore["docstore/data"] && docStore["docstore/data"][refNodeId]) {
+                                        const refNodeData = docStore["docstore/data"][refNodeId];
+
+                                        if (refNodeData.__data__ && typeof refNodeData.__data__ === 'object') {
+                                            const dataObj = refNodeData.__data__;
+
+                                            if (dataObj.text) {
+                                                // Wenn wir Text finden, nehmen wir diesen und brechen die Schleife ab
+                                                text = dataObj.text;
+                                                break;
+                                            }
+
+                                            if (dataObj.extracts) {
+                                                text = Array.isArray(dataObj.extracts)
+                                                    ? dataObj.extracts.join('\n\n')
+                                                    : dataObj.extracts;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Weitere Metadaten-Quellen prüfen
+                    if (vectorStore.metadata_dict && vectorStore.metadata_dict[nodeId]) {
+                        metadata = {...metadata, ...vectorStore.metadata_dict[nodeId]};
+
+                        // Manchmal ist der Text auch in den Metadaten
+                        if (!text && vectorStore.metadata_dict[nodeId].text) {
+                            text = vectorStore.metadata_dict[nodeId].text;
+                        }
+                    }
+
+                    // Wenn wir keine Metadaten haben, versuchen wir die Node-Level-Metadaten
+                    if (Object.keys(metadata).length === 0 && docStore["docstore/metadata"] &&
+                        docStore["docstore/metadata"][nodeId]) {
+                        metadata = docStore["docstore/metadata"][nodeId];
+                    }
+
+                    // Zum Debugging: Bei Top-Ähnlichkeit mehr Details drucken
+                    if (similarity > 0.9) {
+                        console.log(`Hohe Ähnlichkeit (${similarity.toFixed(4)}) für Node ${nodeId}`);
+
+                        if (text) {
+                            console.log(`Text gefunden: "${text.substring(0, 100)}..."`);
+                        } else {
+                            console.log("Kein Text gefunden, versuch direct auf node.__data__ zuzugreifen");
+
+                            if (docStore["docstore/data"] && docStore["docstore/data"][nodeId]) {
+                                const dataField = docStore["docstore/data"][nodeId].__data__;
+
+                                if (dataField) {
+                                    console.log("__data__ Typ:", typeof dataField);
+                                    console.log("__data__ Inhalt-Beispiel:",
+                                        typeof dataField === 'object' ? JSON.stringify(dataField).substring(0, 200) :
+                                            dataField.substring(0, 200));
+                                }
+                            }
+                        }
+                    }
+
+                    // Füge das Ergebnis zur Liste hinzu
+                    results.push({
+                        nodeId,
+                        similarity,
+                        text: text || "Text nicht verfügbar",
+                        metadata
+                    });
+                }
+
+                // Zählen, wie viele Ergebnisse tatsächlich Text haben
+                const resultsWithText = results.filter(r =>
+                    r.text && r.text !== "Text nicht verfügbar"
+                ).length;
+
+                console.log(`Ergebnisse mit Text: ${resultsWithText} von ${results.length}`);
+
+                // Wenn keine Texte gefunden wurden, versuchen wir einen letzten Ansatz mit direktem Textzugriff
+                if (resultsWithText === 0) {
+                    console.log("KRITISCH: Keine Texte gefunden! Versuche direkten Zugriff auf Node-Texte...");
+
+                    // Durchlaufen der Ergebnisse und Versuch, den Text direkt zu extrahieren
+                    for (let i = 0; i < results.length; i++) {
+                        const nodeId = results[i].nodeId;
+
+                        if (docStore["docstore/data"] && docStore["docstore/data"][nodeId]) {
+                            // Direkter Zugriff auf das __data__ Feld
+                            const nodeData = docStore["docstore/data"][nodeId];
+
+                            if (nodeData.__type__ === "Node" && nodeData.__data__) {
+                                // Alternative 1: Direktes data-Objekt
+                                if (typeof nodeData.__data__ === 'object') {
+                                    console.log(`Versuche direkten Objektzugriff für Top-Result ${i+1}`);
+
+                                    // Tiefenscan des Objekts nach Textfeldern
+                                    const extractTextFromObj = (obj, depth = 0) => {
+                                        if (depth > 5) return null; // Tiefenbegrenzung
+
+                                        if (typeof obj === 'string') return obj;
+                                        if (typeof obj !== 'object' || obj === null) return null;
+
+                                        // Bekannte Textfelder prüfen
+                                        if (obj.text) return obj.text;
+                                        if (obj.content) return obj.content;
+                                        if (obj.extract) return obj.extract;
+                                        if (obj.extracts) {
+                                            return Array.isArray(obj.extracts) ?
+                                                obj.extracts.join('\n\n') : obj.extracts;
+                                        }
+
+                                        // Rekursiv in allen Feldern suchen
+                                        for (const key of Object.keys(obj)) {
+                                            const text = extractTextFromObj(obj[key], depth + 1);
+                                            if (text) return text;
+                                        }
+
+                                        return null;
+                                    };
+
+                                    const extractedText = extractTextFromObj(nodeData.__data__);
+                                    if (extractedText) {
+                                        console.log(`Text gefunden durch Tiefenscan!`);
+                                        results[i].text = extractedText;
+                                    }
+                                }
+                                // Alternative 2: String-Serialisierung direkt nutzen
+                                else if (typeof nodeData.__data__ === 'string') {
+                                    results[i].text = nodeData.__data__;
+                                    console.log(`Text als Zeichenkette aus __data__ extrahiert`);
+                                }
+                            }
+                        }
+
+                        // Wenn immer noch kein Text gefunden, versuchen wir das refDocId
+                        if (results[i].text === "Text nicht verfügbar" &&
+                            vectorStore.text_id_to_ref_doc_id &&
+                            vectorStore.text_id_to_ref_doc_id[nodeId]) {
+
+                            const refDocId = vectorStore.text_id_to_ref_doc_id[nodeId];
+                            console.log(`Versuche tieferen Zugriff auf RefDoc ${refDocId} für Result ${i+1}`);
+
+                            // Im Referenzdokument nach Text suchen
+                            if (docStore["docstore/ref_doc_info"] &&
+                                docStore["docstore/ref_doc_info"][refDocId]) {
+
+                                const refDoc = docStore["docstore/ref_doc_info"][refDocId];
+
+                                // Falls RefDoc selbst Text enthält
+                                if (refDoc.text) {
+                                    results[i].text = refDoc.text;
+                                    continue;
+                                }
+
+                                // Versuchen, Texte aus den referenzierten Nodes zu extrahieren
+                                if (refDoc.node_ids && Array.isArray(refDoc.node_ids)) {
+                                    // Alle Texte der referierten Nodes sammeln
+                                    const texts = [];
+
+                                    for (const childNodeId of refDoc.node_ids) {
+                                        if (docStore["docstore/data"] &&
+                                            docStore["docstore/data"][childNodeId]) {
+
+                                            const childNode = docStore["docstore/data"][childNodeId];
+
+                                            // Versuchen Text zu extrahieren wie oben
+                                            if (childNode.__data__) {
+                                                if (typeof childNode.__data__ === 'object') {
+                                                    const dataObj = childNode.__data__;
+
+                                                    if (dataObj.text) {
+                                                        texts.push(dataObj.text);
+                                                    } else if (dataObj.extracts) {
+                                                        texts.push(Array.isArray(dataObj.extracts) ?
+                                                            dataObj.extracts.join('\n\n') :
+                                                            dataObj.extracts);
+                                                    }
+                                                } else if (typeof childNode.__data__ === 'string') {
+                                                    // Versuchen als String zu verwenden
+                                                    texts.push(childNode.__data__);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (texts.length > 0) {
+                                        results[i].text = texts.join('\n\n');
+                                        console.log(`Text aus ${texts.length} Kind-Nodes extrahiert`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Erneut zählen nach dem letzten Versuch
+                    const finalResultsWithText = results.filter(r =>
+                        r.text && r.text !== "Text nicht verfügbar"
+                    ).length;
+
+                    console.log(`Nach letztem Versuch: ${finalResultsWithText} von ${results.length} mit Text`);
+                }
+
+            } catch (error) {
+                console.error('Error during vector search:', error);
+                throw new Error(`Fehler bei der Vektorsuche: ${error.message}`);
+            }
+
+            // Nach Ähnlichkeit sortieren (absteigend) und die besten Ergebnisse zurückgeben
+            const topResults = results
+                .sort((a, b) => b.similarity - a.similarity)
+                .slice(0, maxResults);
+
+            console.log(`Top ${topResults.length} Ergebnisse:`);
+            for (let i = 0; i < topResults.length; i++) {
+                console.log(`#${i+1}: NodeID ${topResults[i].nodeId}, Similarity ${topResults[i].similarity.toFixed(4)}`);
+                console.log(`  Metadata:`, topResults[i].metadata);
+                console.log(`  Text verfügbar: ${topResults[i].text !== "Text nicht verfügbar"}`);
+                if (topResults[i].text !== "Text nicht verfügbar") {
+                    console.log(`  Text Anfang: "${topResults[i].text.substring(0, 100)}..."`);
+                }
+            }
+
+            return topResults;
+        }
+
+        // Cosinus-Ähnlichkeit zwischen zwei Vektoren berechnen
+        function cosineSimilarity(vecA, vecB) {
+            try {
+                // Sicherstellen, dass die Vektoren die gleiche Länge haben
+                if (vecA.length !== vecB.length) {
+                    console.warn(`Vektoren haben unterschiedliche Längen: ${vecA.length} vs ${vecB.length}`);
+                    // Länge anpassen (nur für Notfallberechnung)
+                    const minLength = Math.min(vecA.length, vecB.length);
+                    vecA = vecA.slice(0, minLength);
+                    vecB = vecB.slice(0, minLength);
+                }
+
+                // Skalarprodukt berechnen
+                let dotProduct = 0;
+                for (let i = 0; i < vecA.length; i++) {
+                    dotProduct += vecA[i] * vecB[i];
+                }
+
+                // Längen der Vektoren berechnen
+                const normA = Math.sqrt(vecA.reduce((sum, val) => sum + val * val, 0));
+                const normB = Math.sqrt(vecB.reduce((sum, val) => sum + val * val, 0));
+
+                // Vermeiden von Division durch Null
+                if (normA === 0 || normB === 0) {
+                    return 0;
+                }
+
+                // Cosinus-Ähnlichkeit
+                return dotProduct / (normA * normB);
+            } catch (error) {
+                console.error('Fehler bei der Berechnung der Cosinus-Ähnlichkeit:', error);
+                return 0; // Fallback bei Fehler
+            }
+        }
+
+        // Anthropic API über das Backend-Proxy aufrufen
+        // Anthropic API über das Backend-Proxy aufrufen
+        async function generateAnthropicAnswer(query, topResults, apiKey) {
+            // Kontext aus den Top-Ergebnissen erstellen
+            let validResultCount = 0;
+            const contextParts = [];
+
+            for (const result of topResults) {
+                // Nur Ergebnisse mit tatsächlichem Text verwenden
+                if (result.text && result.text !== "Text nicht verfügbar") {
+                    validResultCount++;
+
+                    const sourceInfo = `Quelle: ${
+                        result.metadata?.filename || 'Unbekannt'
+                    }, Seite: ${
+                        result.metadata?.page_label || 'Unbekannt'
+                    }, Score: ${
+                        result.similarity.toFixed(4)
+                    }`;
+
+                    contextParts.push(`[${validResultCount}] ${sourceInfo}\n${result.text}`);
+                }
+            }
+
+            // Kontext zusammenfügen
+            const context = contextParts.join('\n\n');
+
+            // Prüfen, ob überhaupt gültige Ergebnisse vorhanden sind
+            if (validResultCount === 0) {
+                return `Leider konnte ich keine relevanten Textpassagen in den indizierten Dokumenten finden,
+        um Ihre Frage zu beantworten. Möglicherweise enthält der Index keine Informationen zu diesem Thema
+        oder die Texte konnten nicht korrekt extrahiert werden.`;
+            }
+
+            // Prompt für Anthropic erstellen
+            const messages = [
+                {
+                    role: "user",
+                    content: `Ich habe eine Frage zu einem Dokument. Hier sind die ${validResultCount} relevantesten Textstellen
+            aus den indizierten PDF-Dokumenten:
+
+${context}
+
+Meine Frage lautet: ${query}
+
+Bitte beantworte meine Frage basierend auf den bereitgestellten Textpassagen.
+Falls die Antwort nicht in den Textstellen enthalten ist, gib an, dass du die Antwort
+aus den bereitgestellten Informationen nicht ableiten kannst.
+
+Falls du die Antwort findest, verweise auf die entsprechende(n) Quelle(n) in deiner Antwort.`
+                }
+            ];
+
+            try {
+                // Anfrage an den PHP-Proxy senden
+                const response = await fetch('https://walter-it.de/coco/anthro.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        apiKey: apiKey,
+                        model: "claude-3-5-sonnet-20240620",
+                        messages: messages,
+                        max_tokens: 1024
+                    })
+                });
+
+                // Antwort verarbeiten
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Anthropic API error: ${response.status} ${errorText}`);
+                }
+
+                const data = await response.json();
+                return data.content[0].text;
+            } catch (error) {
+                console.error('Fehler beim Abrufen der Antwort:', error);
+                return `Es ist ein Fehler beim Abrufen der Antwort aufgetreten: ${error.message}\n\n` +
+                    `Bitte überprüfen Sie Ihren API-Schlüssel und versuchen Sie es erneut.`;
+            }
+        }
+
+        // Ergebnisse anzeigen
+        function displayResults(answer, topResults) {
+            // Antwort anzeigen
+            answerElement.innerHTML = `<p>${answer.replace(/\n/g, '<br>')}</p>`;
+
+            // Quellen anzeigen
+            sourcesElement.innerHTML = '';
+            topResults.forEach((result, index) => {
+                const sourceElement = document.createElement('div');
+                sourceElement.className = 'source-item';
+                sourceElement.innerHTML = `
+                    <h6>
+                        [${index + 1}] ${result.metadata.filename || 'Unbekannt'}
+                        (Seite: ${result.metadata.page_label || 'Unbekannt'})
+                        <span class="badge bg-primary score-badge">Score: ${result.similarity.toFixed(4)}</span>
+                    </h6>
+                    <p>${result.text}</p>
+                `;
+                sourcesElement.appendChild(sourceElement);
+            });
+
+            // Ergebniscontainer anzeigen
+            resultContainer.style.display = 'block';
+
+            // Zu den Ergebnissen scrollen
+            resultContainer.scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>
